@@ -1,0 +1,147 @@
+.assets-content {
+  padding: 30px;
+}
+
+.assets-header {
+  margin-bottom: 30px;
+}
+
+.assets-header h2 {
+  color: #333;
+  font-size: 24px;
+  margin-bottom: 20px;
+}
+
+.assets-controls {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+}
+
+.assets-controls .search-box {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: white;
+  padding: 12px 15px;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  color: #999;
+}
+
+.assets-controls .search-box input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 14px;
+}
+
+.add-btn {
+  padding: 12px 20px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.3s;
+}
+
+.add-btn:hover {
+  background: #5568d3;
+}
+
+.assets-table {
+  background: white;
+  padding: 25px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow-x: auto;
+}
+
+.assets-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.assets-table th {
+  background: #f9f9f9;
+  padding: 15px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 14px;
+  color: #666;
+  border-bottom: 2px solid #eee;
+}
+
+.assets-table td {
+  padding: 15px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 14px;
+  color: #333;
+}
+
+.assets-table tr:hover {
+  background: #f9f9f9;
+}
+
+.edit-btn,
+.delete-btn {
+  padding: 8px 12px;
+  margin-right: 8px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.3s;
+}
+
+.edit-btn {
+  background: #2196f3;
+  color: white;
+}
+
+.edit-btn:hover {
+  background: #1976d2;
+}
+
+.delete-btn {
+  background: #ff6b6b;
+  color: white;
+}
+
+.delete-btn:hover {
+  background: #ff5252;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: #999;
+  font-size: 14px;
+}
+
+.no-data {
+  text-align: center;
+  padding: 40px;
+  color: #999;
+}
+
+@media (max-width: 768px) {
+  .assets-controls {
+    flex-direction: column;
+  }
+
+  .assets-controls .search-box,
+  .add-btn {
+    width: 100%;
+  }
+}
