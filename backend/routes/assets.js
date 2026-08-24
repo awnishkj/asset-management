@@ -55,7 +55,7 @@ router.get('/public/:assetId', async (req, res) => {
 // Public update asset from mobile QR scan — no auth needed
 router.post('/public/:assetId/update', async (req, res) => {
   try {
-    const { status, latitude, longitude, location, remarks, scannedBy } = req.body;
+    const { status, latitude, longitude, location, remarks, scannedBy, updatedBy } = req.body;
     const assetId = decodeURIComponent(req.params.assetId);
     const asset = await Asset.findOne({ assetId });
     if (!asset) return res.status(404).json({ message: 'Asset not found' });
@@ -65,7 +65,7 @@ router.post('/public/:assetId/update', async (req, res) => {
     if (longitude != null) asset.longitude = longitude;
     if (location) asset.location = location;
     asset.lastUpdated = new Date();
-    asset.updatedBy = scannedBy || 'Mobile Scan';
+    asset.updatedBy = updatedBy || scannedBy || 'Mobile Scan';
     await asset.save();
 
     const ScanHistory = require('../models/ScanHistory');
@@ -78,6 +78,7 @@ router.post('/public/:assetId/update', async (req, res) => {
       status: status || asset.status,
       remarks: remarks || '',
       scannedBy: scannedBy || 'Mobile Scan',
+      updatedBy: updatedBy || null,
       scannedAt: new Date(),
     });
 

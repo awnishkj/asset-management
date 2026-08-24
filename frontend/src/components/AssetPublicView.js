@@ -149,6 +149,11 @@ export default function AssetPublicView() {
     setSubmitError('');
     try {
       const encodedId = encodeURIComponent(assetId);
+      // Get logged-in username from localStorage if available
+      const storedUser = localStorage.getItem('user');
+      const loggedInUser = storedUser ? JSON.parse(storedUser) : null;
+      const updatedBy = loggedInUser?.username || loggedInUser?.email || null;
+
       await axios.post(`${API_URL}/assets/public/${encodedId}/update`, {
         status: form.status,
         latitude: form.latitude || undefined,
@@ -156,6 +161,7 @@ export default function AssetPublicView() {
         location: form.location || undefined,
         remarks: form.remarks || undefined,
         scannedBy: scannedBy,
+        updatedBy: updatedBy,
       });
       const loggedInNow = !!localStorage.getItem('token');
       const openedFromPC = searchParams.get('source') === 'pc';

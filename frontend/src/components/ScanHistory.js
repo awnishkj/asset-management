@@ -30,7 +30,8 @@ export default function ScanHistory() {
   const filteredHistory = history.filter(record =>
     record.assetId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     record.assetName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    record.location?.toLowerCase().includes(searchTerm.toLowerCase())
+    record.location?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    record.updatedBy?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const totalPages = Math.ceil(filteredHistory.length / ITEMS_PER_PAGE);
@@ -81,6 +82,7 @@ export default function ScanHistory() {
                     <th>Location</th>
                     <th>Status</th>
                     <th>Scanned By</th>
+                    <th>Updated By</th>
                     <th>Remarks</th>
                   </tr>
                 </thead>
@@ -98,13 +100,16 @@ export default function ScanHistory() {
                           </span>
                         </td>
                         <td>{record.scannedBy || 'Unknown'}</td>
+                        <td style={{ color: record.updatedBy ? '#60a5fa' : '#475569', fontStyle: record.updatedBy ? 'normal' : 'italic' }}>
+                          {record.updatedBy || '—'}
+                        </td>
                         <td style={{ color: '#666', fontStyle: record.remarks ? 'normal' : 'italic' }}>
                           {record.remarks || '—'}
                         </td>
                       </tr>
                     ))
                   ) : (
-                    <tr><td colSpan="7" className="no-data">No scan history found</td></tr>
+                    <tr><td colSpan="8" className="no-data">No scan history found</td></tr>
                   )}
                 </tbody>
               </table>
