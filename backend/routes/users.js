@@ -233,7 +233,10 @@ router.post('/admin/add-user', auth, async (req, res) => {
 
     const bcrypt = require('bcryptjs');
     const hashed = await bcrypt.hash(password, 10);
-    const newUser = new User({ username, email, password: hashed, role: role || 'user' });
+    // Prevent creating another admin via this endpoint — only user/manager allowed
+    const allowedRoles = ['user', 'manager'];
+    const assignedRole = allowedRoles.includes(role) ? role : 'user';
+    const newUser = new User({ username, email, password: hashed, role: assignedRole });
     await newUser.save();
 
     const userObj = newUser.toObject();
