@@ -3,7 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
+const { sendEmail } = require('../services/email');
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit
@@ -113,45 +113,41 @@ router.post('/me/2fa/send', auth, async (req, res) => {
     user.twoFactorExpires = expires;
     await user.save();
 
-    // Determine recipient — delete-user and add-user always go to admin email, email-change to new address
-    const ADMIN_EMAIL = 'awnishkj2004@gmail.com';
+    // Determine recipient
+    const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'awnishkj2004@gmail.com';
     const recipient = (type === 'email-change' && newEmail)
       ? newEmail
       : (type === 'delete-user' || type === 'add-user')
         ? ADMIN_EMAIL
         : user.email;
 
-    // Send email if SMTP configured
-    if (process.env.SMTP_HOST && process.env.SMTP_USER) {
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: process.env.SMTP_SECURE === 'true',
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS
-        }
-      });
+    const subject = type === 'email-change'
+      ? 'Verify your new email address — AssetTrack'
+      : 'Your AssetTrack verification code';
+    const codeText = type === 'email-change'
+      ? `Your email change verification code is: ${code}. It expires in 10 minutes.`
+      : `Your verification code is: ${code}. It expires in 10 minutes.`;
 
-      const subject = type === 'email-change'
-        ? 'Verify your new email address'
-        : 'Your verification code';
-      const text = type === 'email-change'
-        ? `Your email change verification code is: ${code}. It expires in 10 minutes.`
-        : `Your verification code is: ${code}. It expires in 10 minutes.`;
-
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    try {
+      await sendEmail({
         to: recipient,
         subject,
-        text
+        text: codeText,
+        html: `
+          <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8fafc;border-radius:12px">
+            <h2 style="color:#1e293b;margin-bottom:8px">AssetTrack Verification</h2>
+            <p style="color:#475569">${type === 'email-change' ? 'Your email change verification code is:' : 'Your verification code is:'}</p>
+            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#3b82f6;padding:16px 0">${code}</div>
+            <p style="color:#94a3b8;font-size:13px">Expires in 10 minutes.</p>
+          </div>`,
       });
-      return res.json({ message: 'Verification code sent' });
+      console.log('[users] 2FA code sent to:', recipient, '| type:', type || 'general');
+    } catch (err) {
+      console.error('[users] Failed to send 2FA email:', err.message);
+      return res.status(500).json({ message: 'Failed to send verification email. Please try again.' });
     }
 
-    // Fallback: log code to server for development
-    console.log(`2FA code for ${recipient}: ${code}`);
-    res.json({ message: 'Verification code generated (check server logs in development)' });
+    return res.json({ message: 'Verification code sent' });
   } catch (error) {
     console.error('POST /api/users/me/2fa/send failed:', error);
     res.status(500).json({ message: error.message || 'Failed to send code' });
