@@ -58,13 +58,32 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Generate 2FA code
+    // ── FIRST LOGIN: twoFactorEnabled is false in the database ──────────────
+    // No OTP generated, no email sent.
+    // Issue JWT immediately, then flip twoFactorEnabled → true for all future logins.
+    if (!user.twoFactorEnabled) {
+      user.twoFactorEnabled = true;
+      await user.save();
+
+      const token = jwt.sign(
+        { userId: user._id },
+        process.env.JWT_SECRET || 'secret',
+        { expiresIn: rememberMe ? '30d' : '7d' }
+      );
+      console.log('[auth] First login — 2FA enabled for future logins. userId:', user._id.toString());
+      return res.json({
+        message: 'Login successful',
+        token,
+        user: { id: user._id, username: user.username, email: user.email, role: user.role },
+      });
+    }
+
+    // ── SUBSEQUENT LOGINS: twoFactorEnabled is true → require OTP ───────────
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     user.twoFactorCode = code;
     user.twoFactorExpires = new Date(Date.now() + 10 * 60 * 1000);
     await user.save();
 
-    // Send 2FA email
     try {
       await sendEmail({
         to: user.email,
@@ -83,19 +102,17 @@ router.post('/login', async (req, res) => {
       return res.status(500).json({ message: 'Failed to send verification email. Please try again.' });
     }
 
-    const setup = !user.twoFactorEnabled;
     const twoFactorToken = jwt.sign(
-      { userId: user._id.toString(), twoFactor: true, rememberMe: !!rememberMe, setup },
+      { userId: user._id.toString(), twoFactor: true, rememberMe: !!rememberMe },
       process.env.JWT_SECRET || 'secret',
       { expiresIn: '10m' }
     );
-    console.log('[auth] 2FA token issued — userId:', user._id.toString(), '| setup:', setup);
+    console.log('[auth] 2FA token issued — userId:', user._id.toString());
 
     return res.json({
-      message: setup ? '2FA setup required' : '2FA required',
+      message: '2FA required',
       twoFactor: true,
       twoFactorToken,
-      setup,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -140,7 +157,7 @@ router.post('/verify-2fa', async (req, res) => {
     if (user.twoFactorCode !== String(code))
       return res.status(400).json({ message: 'Invalid code' });
 
-    if (payload.setup) user.twoFactorEnabled = true;
+    // twoFactorEnabled is already true — just clear the pending code
     user.twoFactorCode = undefined;
     user.twoFactorExpires = undefined;
     await user.save();
@@ -194,7 +211,7 @@ router.post('/resend-2fa', async (req, res) => {
     await user.save();
 
     const newTwoFactorToken = jwt.sign(
-      { userId: user._id, twoFactor: true, rememberMe: !!payload.rememberMe, setup: !user.twoFactorEnabled },
+      { userId: user._id, twoFactor: true, rememberMe: !!payload.rememberMe },
       process.env.JWT_SECRET || 'secret',
       { expiresIn: '10m' }
     );
