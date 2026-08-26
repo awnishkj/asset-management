@@ -1,57 +1,42 @@
 /**
  * services/email.js
  *
- * Email delivery via Gmail SMTP (Nodemailer).
- * All environment variables are read at call time — never hardcoded.
+ * Email delivery via Resend HTTPS API.
+ * Works on Render Free (no SMTP ports required).
  *
  * Required environment variables:
- *   SMTP_HOST   e.g. smtp.gmail.com
- *   SMTP_PORT   e.g. 465
- *   SMTP_SECURE e.g. true
- *   SMTP_USER   e.g. you@gmail.com
- *   SMTP_PASS   Gmail App Password
- *   SMTP_FROM   e.g. AssetTrack <you@gmail.com>  (optional, defaults to SMTP_USER)
+ *   RESEND_API_KEY  — API key from resend.com (starts with re_)
+ *   EMAIL_FROM      — Sender address, e.g. "AssetTrack <no-reply@yourdomain.com>"
  *
  * Usage:
  *   const { sendEmail } = require('../services/email');
  *   await sendEmail({ to, subject, text, html });
  */
 
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-console.log('Email provider: Gmail SMTP');
+console.log('Email provider: Resend');
 
 /**
  * @param {{ to: string, subject: string, text: string, html?: string }} opts
  */
 async function sendEmail({ to, subject, text, html }) {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    throw new Error(
-      'SMTP is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASS in your environment variables.'
-    );
-  }
+  const resend = new Resend(process.env.RESEND_API_KEY);
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
-
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
-
-  const info = await transporter.sendMail({
-    from,
-    to,
+  const { data, error } = await resend.emails.send({
+    from: process.env.EMAIL_FROM,
+    to: [to],
     subject,
     text,
     html: html || text,
   });
 
-  console.log('[email] Sent via Gmail SMTP — messageId:', info.messageId, '| to:', to);
+  if (error) {
+    console.error('[email] Resend error:', error);
+    throw new Error(error.message || 'Failed to send email');
+  }
+
+  console.log('[email] Resend email sent successfully:', data?.id);
 }
 
 module.exports = { sendEmail };
