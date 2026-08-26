@@ -46,6 +46,12 @@ async function sendEmail({ to, subject, text, html }) {
     ],
   };
 
+  console.log('[email] Preparing Mailjet email:', {
+    from: from.Email,
+    to: recipient.Email,
+    subject,
+  });
+
   let response;
   try {
     response = await axios.post(
