@@ -1,42 +1,59 @@
 /**
  * services/email.js
  *
- * Email delivery via Resend HTTPS API.
- * Works on Render Free (no SMTP ports required).
+ * Email delivery via Mailjet SMTP (Nodemailer).
+ * Works on Render Free — uses HTTPS port 587 with STARTTLS.
  *
  * Required environment variables:
- *   RESEND_API_KEY  — API key from resend.com (starts with re_)
- *   EMAIL_FROM      — Sender address, e.g. "AssetTrack <no-reply@yourdomain.com>"
+ *   MAIL_HOST   — e.g. in-v3.mailjet.com
+ *   MAIL_PORT   — e.g. 587
+ *   MAIL_USER   — Mailjet API key (public key)
+ *   MAIL_PASS   — Mailjet secret key
+ *   EMAIL_FROM  — e.g. "AssetTrack <no-reply@yourdomain.com>"
  *
  * Usage:
  *   const { sendEmail } = require('../services/email');
  *   await sendEmail({ to, subject, text, html });
  */
 
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 
-console.log('Email provider: Resend');
+console.log('Email provider: Mailjet SMTP');
+
+// Build transporter once at module load — shared across all calls
+const transporter = nodemailer.createTransport({
+  host: process.env.MAIL_HOST,
+  port: Number(process.env.MAIL_PORT || 587),
+  secure: false,       // false for port 587 — STARTTLS is negotiated
+  requireTLS: true,    // force STARTTLS upgrade
+  auth: {
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS,
+  },
+});
+
+// Verify SMTP configuration at startup so errors appear in Render logs
+transporter.verify((err) => {
+  if (err) {
+    console.error('[email] Mailjet SMTP configuration error:', err.message);
+  } else {
+    console.log('[email] Mailjet SMTP ready');
+  }
+});
 
 /**
  * @param {{ to: string, subject: string, text: string, html?: string }} opts
  */
 async function sendEmail({ to, subject, text, html }) {
-  const resend = new Resend(process.env.RESEND_API_KEY);
-
-  const { data, error } = await resend.emails.send({
+  const info = await transporter.sendMail({
     from: process.env.EMAIL_FROM,
-    to: [to],
+    to,
     subject,
     text,
     html: html || text,
   });
 
-  if (error) {
-    console.error('[email] Resend error:', error);
-    throw new Error(error.message || 'Failed to send email');
-  }
-
-  console.log('[email] Resend email sent successfully:', data?.id);
+  console.log('[email] Mailjet SMTP sent — messageId:', info.messageId, '| to:', to);
 }
 
 module.exports = { sendEmail };
