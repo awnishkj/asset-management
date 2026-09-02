@@ -248,7 +248,7 @@ export default function Users() {
                 </>
               ) : (
                 <>
-                  <p style={M.text}>Enter the 6-digit code sent to your email to confirm creating <strong>{addForm.username}</strong>.</p>
+                  <p style={M.text}>Enter the 6-digit code sent to the administrator email to confirm creating <strong>{addForm.username}</strong>.</p>
                   <input style={{ ...M.input, letterSpacing: 4, textAlign: 'center', fontSize: 18 }}
                     type="text" maxLength={6} placeholder="000000"
                     value={addCode} onChange={e => setAddCode(e.target.value)} autoFocus />
@@ -279,7 +279,7 @@ export default function Users() {
                     You are about to delete <strong>{deleteTarget.username}</strong> ({deleteTarget.email}).
                     This action <strong>cannot be undone</strong>.
                   </p>
-                  <p style={M.text}>A verification code will be sent to your email to confirm.</p>
+                  <p style={M.text}>A verification code will be sent to the administrator email to confirm.</p>
                   {deleteError && <p style={M.err}>{deleteError}</p>}
                   <div style={M.btnRow}>
                     <button style={M.cancelBtn} onClick={closeDeleteModal}>Cancel</button>
@@ -291,7 +291,7 @@ export default function Users() {
               ) : (
                 <>
                   <p style={M.text}>
-                    Enter the 6-digit code sent to your email to confirm deletion of <strong>{deleteTarget.username}</strong>.
+                    Enter the 6-digit code sent to the administrator email to confirm deletion of <strong>{deleteTarget.username}</strong>.
                   </p>
                   <input
                     type="text"
