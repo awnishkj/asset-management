@@ -3,11 +3,55 @@ const router = express.Router();
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { authenticator } = require('otplib');
 const QRCode = require('qrcode');
 
-// otplib settings: 6 digits, 30s period, SHA1 (standard defaults — matches Google/Microsoft Authenticator)
-authenticator.options = { digits: 6, step: 30 };
+// ── otplib v13 — synchronous TOTP helpers ────────────────────────────────
+// Confirmed working API from package inspection:
+//   generateSecret()                            → Base32 secret string
+//   generateSync({ type:'totp', secret })       → 6-digit code string
+//   verifySync({ type:'totp', token, secret })  → { valid, delta, epoch, timeStep }
+//   generateURI({ type, label, secret, issuer }) → otpauth:// URI string
+
+const {
+  generateSecret,
+  generateSync,
+  verifySync,
+  generateURI,
+} = require('otplib');
+
+/**
+ * Generate a new Base32 TOTP secret.
+ */
+function totpGenerateSecret() {
+  return generateSecret();
+}
+
+/**
+ * Build an otpauth:// URI compatible with Google/Microsoft Authenticator.
+ * label format: "AssetTrack:user@email.com"
+ */
+function totpGenerateUri(email, secret) {
+  return generateURI({
+    type: 'totp',
+    label: `AssetTrack:${email}`,
+    secret,
+    issuer: 'AssetTrack',
+  });
+}
+
+/**
+ * Verify a TOTP code against a secret.
+ * Returns true if valid, false otherwise.
+ */
+function totpVerify(token, secret) {
+  try {
+    const result = verifySync({ type: 'totp', token: String(token), secret });
+    return result && result.valid === true;
+  } catch (err) {
+    console.error('[totp] verifySync error:', err.message);
+    return false;
+  }
+}
 
 // ─── Register ─────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
@@ -25,8 +69,6 @@ router.post('/register', async (req, res) => {
       email,
       password: hashedPassword,
       twoFactorEnabled: false,
-      twoFactorSecret: undefined,
-      twoFactorPendingSecret: undefined,
     });
     await user.save();
 
@@ -70,15 +112,14 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // ── FIRST LOGIN: twoFactorEnabled=false and no twoFactorSecret ──────────
-    // Generate TOTP secret, return QR code for Authenticator setup.
-    // Do NOT issue a full JWT yet — user must verify the TOTP first.
+    // ── FIRST LOGIN: no twoFactorSecret yet ──────────────────────────────────
+    // Generate TOTP secret, return QR code. No JWT issued until TOTP verified.
     if (!user.twoFactorEnabled && !user.twoFactorSecret) {
-      const secret = authenticator.generateSecret();
+      const secret = totpGenerateSecret();
       user.twoFactorPendingSecret = secret;
       await user.save();
 
-      const otpauthUri = authenticator.keyuri(user.email, 'AssetTrack', secret);
+      const otpauthUri = totpGenerateUri(user.email, secret);
       let qrCode;
       try {
         qrCode = await QRCode.toDataURL(otpauthUri);
@@ -99,14 +140,14 @@ router.post('/login', async (req, res) => {
         twoFactor: true,
         setup: true,
         twoFactorToken,
-        qrCode,           // base64 data URL — only returned once
-        manualKey: secret, // for manual entry — only returned once
+        qrCode,            // base64 PNG — shown once only
+        manualKey: secret, // manual entry key — shown once only
         message: 'Scan the QR code with your Authenticator app, then enter the 6-digit code.',
       });
     }
 
-    // ── SUBSEQUENT LOGINS: twoFactorEnabled=true → verify Authenticator TOTP ─
-    // No email sent. Return temporary token for /verify-2fa.
+    // ── SUBSEQUENT LOGINS: twoFactorEnabled=true ─────────────────────────────
+    // No email. Return temporary token — /verify-2fa checks the Authenticator code.
     const twoFactorToken = jwt.sign(
       { userId: user._id.toString(), twoFactor: true, setup: false, rememberMe: !!rememberMe },
       process.env.JWT_SECRET || 'secret',
@@ -158,31 +199,26 @@ router.post('/verify-2fa', async (req, res) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     if (payload.setup) {
-      // ── SETUP VERIFICATION: verify against twoFactorPendingSecret ──────────
+      // Setup: verify against twoFactorPendingSecret, then promote it
       if (!user.twoFactorPendingSecret) {
         return res.status(400).json({ message: 'No setup in progress. Please log in again.' });
       }
-
-      const isValid = authenticator.verify({ token: String(code), secret: user.twoFactorPendingSecret });
-      if (!isValid) {
+      if (!totpVerify(code, user.twoFactorPendingSecret)) {
         return res.status(400).json({ message: 'Invalid code. Make sure your Authenticator app is synced.' });
       }
 
-      // Promote pending secret → permanent secret, enable 2FA
       user.twoFactorSecret = user.twoFactorPendingSecret;
       user.twoFactorPendingSecret = undefined;
       user.twoFactorEnabled = true;
       await user.save();
-
       console.log('[auth] TOTP setup complete — 2FA enabled for userId:', user._id.toString());
+
     } else {
-      // ── REGULAR VERIFICATION: verify against twoFactorSecret ───────────────
+      // Regular login: verify against permanent twoFactorSecret
       if (!user.twoFactorSecret) {
         return res.status(400).json({ message: 'Authenticator not configured. Please contact support.' });
       }
-
-      const isValid = authenticator.verify({ token: String(code), secret: user.twoFactorSecret });
-      if (!isValid) {
+      if (!totpVerify(code, user.twoFactorSecret)) {
         return res.status(400).json({ message: 'Invalid code. Check your Authenticator app.' });
       }
     }
@@ -206,15 +242,13 @@ router.post('/verify-2fa', async (req, res) => {
 });
 
 // ─── Resend 2FA — not applicable for Authenticator TOTP ──────────────────
-// Authenticator codes are generated by the app, not sent by email.
-router.post('/resend-2fa', async (req, res) => {
+router.post('/resend-2fa', (req, res) => {
   res.status(400).json({
     message: 'Authenticator codes are generated by your Authenticator app and cannot be resent. Open Google Authenticator or Microsoft Authenticator to get your current code.',
   });
 });
 
-// ─── QR Login — requires password + Authenticator TOTP ───────────────────
-// Does NOT bypass 2FA.
+// ─── QR Login — requires password + Authenticator TOTP, no bypass ────────
 router.post('/qr-login', async (req, res) => {
   try {
     const { identifier, password, totpCode } = req.body;
@@ -227,17 +261,13 @@ router.post('/qr-login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
 
-    // Must also verify Authenticator TOTP
     if (!user.twoFactorEnabled || !user.twoFactorSecret) {
       return res.status(400).json({ message: 'Authenticator not set up. Please log in from the main login page first.' });
     }
-
     if (!totpCode) {
       return res.status(400).json({ message: 'Authenticator code is required.' });
     }
-
-    const isValid = authenticator.verify({ token: String(totpCode), secret: user.twoFactorSecret });
-    if (!isValid) {
+    if (!totpVerify(totpCode, user.twoFactorSecret)) {
       return res.status(400).json({ message: 'Invalid Authenticator code.' });
     }
 
@@ -254,20 +284,17 @@ router.post('/qr-login', async (req, res) => {
 });
 
 // ─── Forgot Password — Step 1: verify account exists ─────────────────────
-// Returns a short-lived token to proceed to TOTP verification.
-// No email sent.
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
 
     const user = await User.findOne({ email });
-    // Always return the same message to avoid user enumeration
     if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      // Avoid user enumeration — always return success-like message
       return res.json({ message: 'If this account exists and has Authenticator set up, you may proceed to verification.' });
     }
 
-    // Issue a short-lived token scoped to password reset
     const resetStepToken = jwt.sign(
       { userId: user._id.toString(), resetStep: 'totp', purpose: 'password-reset' },
       process.env.JWT_SECRET || 'secret',
@@ -307,12 +334,10 @@ router.post('/forgot-password/verify-totp', async (req, res) => {
       return res.status(404).json({ message: 'User not found or Authenticator not configured.' });
     }
 
-    const isValid = authenticator.verify({ token: String(totpCode), secret: user.twoFactorSecret });
-    if (!isValid) {
+    if (!totpVerify(totpCode, user.twoFactorSecret)) {
       return res.status(400).json({ message: 'Invalid Authenticator code.' });
     }
 
-    // Issue a short-lived password-reset token
     const passwordResetToken = jwt.sign(
       { userId: user._id.toString(), purpose: 'password-reset', verified: true },
       process.env.JWT_SECRET || 'secret',
@@ -351,7 +376,6 @@ router.post('/reset-password', async (req, res) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     user.password = await bcrypt.hash(newPassword, 10);
-    // Clear any stale OTP fields
     user.twoFactorCode = undefined;
     user.twoFactorExpires = undefined;
     await user.save();
