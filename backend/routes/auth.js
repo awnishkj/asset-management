@@ -3,7 +3,11 @@ const router = express.Router();
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const { sendEmail } = require('../services/email');
+const { authenticator } = require('otplib');
+const QRCode = require('qrcode');
+
+// otplib settings: 6 digits, 30s period, SHA1 (standard defaults — matches Google/Microsoft Authenticator)
+authenticator.options = { digits: 6, step: 30 };
 
 // ─── Register ─────────────────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
@@ -15,7 +19,15 @@ router.post('/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, await bcrypt.genSalt(10));
 
-    const user = new User({ username, email, password: hashedPassword });
+    // New users start with twoFactorEnabled=false and no TOTP secret
+    const user = new User({
+      username,
+      email,
+      password: hashedPassword,
+      twoFactorEnabled: false,
+      twoFactorSecret: undefined,
+      twoFactorPendingSecret: undefined,
+    });
     await user.save();
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret', {
@@ -58,68 +70,62 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // ── FIRST LOGIN: twoFactorEnabled is false in the database ──────────────
-    // No OTP generated, no email sent.
-    // Issue JWT immediately, then flip twoFactorEnabled → true for all future logins.
-    if (!user.twoFactorEnabled) {
-      user.twoFactorEnabled = true;
+    // ── FIRST LOGIN: twoFactorEnabled=false and no twoFactorSecret ──────────
+    // Generate TOTP secret, return QR code for Authenticator setup.
+    // Do NOT issue a full JWT yet — user must verify the TOTP first.
+    if (!user.twoFactorEnabled && !user.twoFactorSecret) {
+      const secret = authenticator.generateSecret();
+      user.twoFactorPendingSecret = secret;
       await user.save();
 
-      const token = jwt.sign(
-        { userId: user._id },
+      const otpauthUri = authenticator.keyuri(user.email, 'AssetTrack', secret);
+      let qrCode;
+      try {
+        qrCode = await QRCode.toDataURL(otpauthUri);
+      } catch (err) {
+        console.error('[auth] QR code generation failed:', err.message);
+        return res.status(500).json({ message: 'Failed to generate QR code' });
+      }
+
+      const twoFactorToken = jwt.sign(
+        { userId: user._id.toString(), twoFactor: true, setup: true, rememberMe: !!rememberMe },
         process.env.JWT_SECRET || 'secret',
-        { expiresIn: rememberMe ? '30d' : '7d' }
+        { expiresIn: '10m' }
       );
-      console.log('[auth] First login — 2FA enabled for future logins. userId:', user._id.toString());
+
+      console.log('[auth] First login — TOTP setup initiated for userId:', user._id.toString());
+
       return res.json({
-        message: 'Login successful',
-        token,
-        user: { id: user._id, username: user.username, email: user.email, role: user.role },
+        twoFactor: true,
+        setup: true,
+        twoFactorToken,
+        qrCode,           // base64 data URL — only returned once
+        manualKey: secret, // for manual entry — only returned once
+        message: 'Scan the QR code with your Authenticator app, then enter the 6-digit code.',
       });
     }
 
-    // ── SUBSEQUENT LOGINS: twoFactorEnabled is true → require OTP ───────────
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    user.twoFactorCode = code;
-    user.twoFactorExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-
-    try {
-      await sendEmail({
-        to: user.email,
-        subject: 'Your AssetTrack login verification code',
-        text: `Your login verification code is: ${code}\n\nThis code expires in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8fafc;border-radius:12px">
-            <h2 style="color:#1e293b;margin-bottom:8px">AssetTrack Login</h2>
-            <p style="color:#475569">Your verification code is:</p>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#3b82f6;padding:16px 0">${code}</div>
-            <p style="color:#94a3b8;font-size:13px">Expires in 10 minutes. If you didn't request this, ignore this email.</p>
-          </div>`,
-      });
-    } catch (err) {
-      console.error('[auth] Failed to send 2FA email during login:', err.message);
-      return res.status(500).json({ message: 'Failed to send verification email. Please try again.' });
-    }
-
+    // ── SUBSEQUENT LOGINS: twoFactorEnabled=true → verify Authenticator TOTP ─
+    // No email sent. Return temporary token for /verify-2fa.
     const twoFactorToken = jwt.sign(
-      { userId: user._id.toString(), twoFactor: true, rememberMe: !!rememberMe },
+      { userId: user._id.toString(), twoFactor: true, setup: false, rememberMe: !!rememberMe },
       process.env.JWT_SECRET || 'secret',
       { expiresIn: '10m' }
     );
-    console.log('[auth] 2FA token issued — userId:', user._id.toString());
+    console.log('[auth] 2FA required — TOTP verify needed for userId:', user._id.toString());
 
     return res.json({
-      message: '2FA required',
       twoFactor: true,
+      setup: false,
       twoFactorToken,
+      message: 'Enter the 6-digit code from your Authenticator app.',
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// ─── Verify 2FA ───────────────────────────────────────────────────────────
+// ─── Verify 2FA (TOTP) ────────────────────────────────────────────────────
 router.post('/verify-2fa', async (req, res) => {
   try {
     const token =
@@ -150,17 +156,36 @@ router.post('/verify-2fa', async (req, res) => {
 
     const user = await User.findById(payload.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    if (!user.twoFactorCode || !user.twoFactorExpires)
-      return res.status(400).json({ message: 'No code pending' });
-    if (new Date() > new Date(user.twoFactorExpires))
-      return res.status(400).json({ message: 'Code expired' });
-    if (user.twoFactorCode !== String(code))
-      return res.status(400).json({ message: 'Invalid code' });
 
-    // twoFactorEnabled is already true — just clear the pending code
-    user.twoFactorCode = undefined;
-    user.twoFactorExpires = undefined;
-    await user.save();
+    if (payload.setup) {
+      // ── SETUP VERIFICATION: verify against twoFactorPendingSecret ──────────
+      if (!user.twoFactorPendingSecret) {
+        return res.status(400).json({ message: 'No setup in progress. Please log in again.' });
+      }
+
+      const isValid = authenticator.verify({ token: String(code), secret: user.twoFactorPendingSecret });
+      if (!isValid) {
+        return res.status(400).json({ message: 'Invalid code. Make sure your Authenticator app is synced.' });
+      }
+
+      // Promote pending secret → permanent secret, enable 2FA
+      user.twoFactorSecret = user.twoFactorPendingSecret;
+      user.twoFactorPendingSecret = undefined;
+      user.twoFactorEnabled = true;
+      await user.save();
+
+      console.log('[auth] TOTP setup complete — 2FA enabled for userId:', user._id.toString());
+    } else {
+      // ── REGULAR VERIFICATION: verify against twoFactorSecret ───────────────
+      if (!user.twoFactorSecret) {
+        return res.status(400).json({ message: 'Authenticator not configured. Please contact support.' });
+      }
+
+      const isValid = authenticator.verify({ token: String(code), secret: user.twoFactorSecret });
+      if (!isValid) {
+        return res.status(400).json({ message: 'Invalid code. Check your Authenticator app.' });
+      }
+    }
 
     const authToken = jwt.sign(
       { userId: user._id },
@@ -168,6 +193,7 @@ router.post('/verify-2fa', async (req, res) => {
       { expiresIn: payload.rememberMe ? '30d' : '7d' }
     );
 
+    // Never expose TOTP secrets in the response
     res.json({
       message: 'Login successful',
       token: authToken,
@@ -179,72 +205,20 @@ router.post('/verify-2fa', async (req, res) => {
   }
 });
 
-// ─── Resend 2FA ───────────────────────────────────────────────────────────
+// ─── Resend 2FA — not applicable for Authenticator TOTP ──────────────────
+// Authenticator codes are generated by the app, not sent by email.
 router.post('/resend-2fa', async (req, res) => {
-  try {
-    const token =
-      req.headers.authorization?.split(' ')[1] ||
-      req.body.twoFactorToken ||
-      req.query.twoFactorToken;
-
-    if (!token) {
-      console.error('[auth] resend-2fa: missing token');
-      return res.status(400).json({ message: 'Missing twoFactorToken' });
-    }
-
-    let payload;
-    try {
-      payload = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-    } catch (err) {
-      console.error('[auth] resend-2fa: invalid JWT');
-      return res.status(401).json({ message: 'Invalid or expired twoFactorToken' });
-    }
-    if (!payload.twoFactor || !payload.userId)
-      return res.status(400).json({ message: 'Invalid two factor token' });
-
-    const user = await User.findById(payload.userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    user.twoFactorCode = code;
-    user.twoFactorExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await user.save();
-
-    const newTwoFactorToken = jwt.sign(
-      { userId: user._id, twoFactor: true, rememberMe: !!payload.rememberMe },
-      process.env.JWT_SECRET || 'secret',
-      { expiresIn: '10m' }
-    );
-
-    try {
-      await sendEmail({
-        to: user.email,
-        subject: 'Your new AssetTrack verification code',
-        text: `Your new login verification code is: ${code}\n\nThis code expires in 10 minutes.`,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8fafc;border-radius:12px">
-            <h2 style="color:#1e293b;margin-bottom:8px">New Verification Code</h2>
-            <p style="color:#475569">Your new verification code is:</p>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#3b82f6;padding:16px 0">${code}</div>
-            <p style="color:#94a3b8;font-size:13px">Expires in 10 minutes.</p>
-          </div>`,
-      });
-    } catch (err) {
-      console.error('[auth] Failed to send 2FA email during resend:', err.message);
-      return res.status(500).json({ message: 'Failed to resend verification email. Please try again.' });
-    }
-
-    res.json({ message: 'Verification code resent', twoFactorToken: newTwoFactorToken });
-  } catch (error) {
-    console.error('[auth] POST /resend-2fa failed:', error);
-    res.status(500).json({ message: error.message || 'Resend failed' });
-  }
+  res.status(400).json({
+    message: 'Authenticator codes are generated by your Authenticator app and cannot be resent. Open Google Authenticator or Microsoft Authenticator to get your current code.',
+  });
 });
 
-// ─── QR Login (no 2FA) ────────────────────────────────────────────────────
+// ─── QR Login — requires password + Authenticator TOTP ───────────────────
+// Does NOT bypass 2FA.
 router.post('/qr-login', async (req, res) => {
   try {
-    const { identifier, password } = req.body;
+    const { identifier, password, totpCode } = req.body;
+
     const user = await User.findOne({
       $or: [{ email: identifier }, { username: identifier }],
     });
@@ -252,6 +226,20 @@ router.post('/qr-login', async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+
+    // Must also verify Authenticator TOTP
+    if (!user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(400).json({ message: 'Authenticator not set up. Please log in from the main login page first.' });
+    }
+
+    if (!totpCode) {
+      return res.status(400).json({ message: 'Authenticator code is required.' });
+    }
+
+    const isValid = authenticator.verify({ token: String(totpCode), secret: user.twoFactorSecret });
+    if (!isValid) {
+      return res.status(400).json({ message: 'Invalid Authenticator code.' });
+    }
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret', {
       expiresIn: '7d',
@@ -265,59 +253,107 @@ router.post('/qr-login', async (req, res) => {
   }
 });
 
-// ─── Forgot Password ──────────────────────────────────────────────────────
+// ─── Forgot Password — Step 1: verify account exists ─────────────────────
+// Returns a short-lived token to proceed to TOTP verification.
+// No email sent.
 router.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+
     const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ message: 'No account found with that email' });
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    user.twoFactorCode = code;
-    user.twoFactorExpires = new Date(Date.now() + 15 * 60 * 1000);
-    await user.save();
-
-    try {
-      await sendEmail({
-        to: user.email,
-        subject: 'AssetTrack Password Reset Code',
-        text: `Your password reset code is: ${code}\n\nThis code expires in 15 minutes.\n\nIf you did not request this, ignore this email.`,
-        html: `
-          <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8fafc;border-radius:12px">
-            <h2 style="color:#1e293b;margin-bottom:8px">Password Reset</h2>
-            <p style="color:#475569">Your reset code is:</p>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#ef4444;padding:16px 0">${code}</div>
-            <p style="color:#94a3b8;font-size:13px">Expires in 15 minutes. If you didn't request this, ignore this email.</p>
-          </div>`,
-      });
-    } catch (err) {
-      console.error('[auth] Failed to send password reset email:', err.message);
-      return res.status(500).json({ message: 'Failed to send reset email. Please try again.' });
+    // Always return the same message to avoid user enumeration
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.json({ message: 'If this account exists and has Authenticator set up, you may proceed to verification.' });
     }
 
-    res.json({ message: 'Reset code sent to your email' });
+    // Issue a short-lived token scoped to password reset
+    const resetStepToken = jwt.sign(
+      { userId: user._id.toString(), resetStep: 'totp', purpose: 'password-reset' },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '10m' }
+    );
+
+    res.json({
+      message: 'Account found. Enter the 6-digit code from your Authenticator app.',
+      resetStepToken,
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message || 'Failed to send reset email' });
+    res.status(500).json({ message: err.message || 'Failed to process request' });
   }
 });
 
-// ─── Reset Password ───────────────────────────────────────────────────────
+// ─── Forgot Password — Step 2: verify TOTP → issue password-reset token ──
+router.post('/forgot-password/verify-totp', async (req, res) => {
+  try {
+    const { resetStepToken, totpCode } = req.body;
+    if (!resetStepToken || !totpCode) {
+      return res.status(400).json({ message: 'Token and Authenticator code are required' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(resetStepToken, process.env.JWT_SECRET || 'secret');
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid or expired token. Please start again.' });
+    }
+
+    if (payload.resetStep !== 'totp' || payload.purpose !== 'password-reset') {
+      return res.status(400).json({ message: 'Invalid token type.' });
+    }
+
+    const user = await User.findById(payload.userId);
+    if (!user || !user.twoFactorSecret) {
+      return res.status(404).json({ message: 'User not found or Authenticator not configured.' });
+    }
+
+    const isValid = authenticator.verify({ token: String(totpCode), secret: user.twoFactorSecret });
+    if (!isValid) {
+      return res.status(400).json({ message: 'Invalid Authenticator code.' });
+    }
+
+    // Issue a short-lived password-reset token
+    const passwordResetToken = jwt.sign(
+      { userId: user._id.toString(), purpose: 'password-reset', verified: true },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '10m' }
+    );
+
+    res.json({
+      message: 'Authenticator verified. You may now reset your password.',
+      passwordResetToken,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Verification failed' });
+  }
+});
+
+// ─── Reset Password — Step 3: apply new password ─────────────────────────
 router.post('/reset-password', async (req, res) => {
   try {
-    const { email, code, newPassword } = req.body;
-    if (!email || !code || !newPassword)
-      return res.status(400).json({ message: 'All fields required' });
+    const { passwordResetToken, newPassword } = req.body;
+    if (!passwordResetToken || !newPassword) {
+      return res.status(400).json({ message: 'Reset token and new password are required' });
+    }
 
-    const user = await User.findOne({ email });
+    let payload;
+    try {
+      payload = jwt.verify(passwordResetToken, process.env.JWT_SECRET || 'secret');
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid or expired reset token. Please start again.' });
+    }
+
+    if (payload.purpose !== 'password-reset' || !payload.verified) {
+      return res.status(400).json({ message: 'Invalid reset token.' });
+    }
+
+    const user = await User.findById(payload.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    if (!user.twoFactorCode || user.twoFactorCode !== code)
-      return res.status(400).json({ message: 'Invalid or expired code' });
-    if (user.twoFactorExpires < new Date())
-      return res.status(400).json({ message: 'Code has expired' });
 
     user.password = await bcrypt.hash(newPassword, 10);
-    user.twoFactorCode = null;
-    user.twoFactorExpires = null;
+    // Clear any stale OTP fields
+    user.twoFactorCode = undefined;
+    user.twoFactorExpires = undefined;
     await user.save();
 
     res.json({ message: 'Password reset successfully' });

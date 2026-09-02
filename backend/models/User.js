@@ -21,6 +21,8 @@ const userSchema = new mongoose.Schema({
   joinedAt: { type: Date, default: Date.now },
   empId: { type: String },
   twoFactorEnabled: { type: Boolean, default: false },
+  twoFactorSecret: { type: String },           // permanent TOTP secret (after setup)
+  twoFactorPendingSecret: { type: String },     // temporary secret during first-login setup
   notificationPrefs: { type: Object, default: {} },
   role: {
     type: String,

@@ -99,55 +99,58 @@ router.post('/me/avatar', auth, upload.single('avatar'), async (req, res) => {
   }
 });
 
-// Send 2FA code to user's email
+// Send 2FA code to email — ONLY for admin-sensitive actions (add-user, delete-user).
+// Email goes exclusively to ADMIN_EMAIL, never to normal users.
 router.post('/me/2fa/send', auth, async (req, res) => {
   try {
-    const { type, newEmail } = req.body || {};
+    const { type } = req.body || {};
+
+    // Only allow email OTP for admin actions
+    const adminOnlyTypes = ['add-user', 'delete-user'];
+    if (!adminOnlyTypes.includes(type)) {
+      return res.status(400).json({
+        message: 'Email verification is only available for admin-sensitive actions. Use your Authenticator app for personal account actions.',
+      });
+    }
+
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expires = new Date(Date.now() + 10 * 60 * 1000);
 
     user.twoFactorCode = code;
     user.twoFactorExpires = expires;
     await user.save();
 
-    // Determine recipient
+    // Always send to ADMIN_EMAIL only — never to normal user's email
     const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'awnishkj2004@gmail.com';
-    const recipient = (type === 'email-change' && newEmail)
-      ? newEmail
-      : (type === 'delete-user' || type === 'add-user')
-        ? ADMIN_EMAIL
-        : user.email;
 
-    const subject = type === 'email-change'
-      ? 'Verify your new email address — AssetTrack'
-      : 'Your AssetTrack verification code';
-    const codeText = type === 'email-change'
-      ? `Your email change verification code is: ${code}. It expires in 10 minutes.`
-      : `Your verification code is: ${code}. It expires in 10 minutes.`;
+    const subject = type === 'add-user'
+      ? 'AssetTrack — Admin verification: Add user'
+      : 'AssetTrack — Admin verification: Delete user';
+    const codeText = `Your admin verification code is: ${code}. It expires in 10 minutes.`;
 
     try {
       await sendEmail({
-        to: recipient,
+        to: ADMIN_EMAIL,
         subject,
         text: codeText,
         html: `
           <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;background:#f8fafc;border-radius:12px">
-            <h2 style="color:#1e293b;margin-bottom:8px">AssetTrack Verification</h2>
-            <p style="color:#475569">${type === 'email-change' ? 'Your email change verification code is:' : 'Your verification code is:'}</p>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#3b82f6;padding:16px 0">${code}</div>
-            <p style="color:#94a3b8;font-size:13px">Expires in 10 minutes.</p>
+            <h2 style="color:#1e293b;margin-bottom:8px">AssetTrack Admin Action</h2>
+            <p style="color:#475569">Your verification code for <strong>${type}</strong> is:</p>
+            <div style="font-size:36px;font-weight:700;letter-spacing:8px;color:#ef4444;padding:16px 0">${code}</div>
+            <p style="color:#94a3b8;font-size:13px">Expires in 10 minutes. If you did not request this, ignore this email.</p>
           </div>`,
       });
-      console.log('[users] 2FA code sent to:', recipient, '| type:', type || 'general');
+      console.log('[users] Admin OTP sent to ADMIN_EMAIL for type:', type);
     } catch (err) {
-      console.error('[users] Failed to send 2FA email:', err.message);
+      console.error('[users] Failed to send admin OTP email:', err.message);
       return res.status(500).json({ message: 'Failed to send verification email. Please try again.' });
     }
 
-    return res.json({ message: 'Verification code sent' });
+    return res.json({ message: 'Verification code sent to admin email' });
   } catch (error) {
     console.error('POST /api/users/me/2fa/send failed:', error);
     res.status(500).json({ message: error.message || 'Failed to send code' });
@@ -236,7 +239,13 @@ router.post('/admin/add-user', auth, async (req, res) => {
     // Prevent creating another admin via this endpoint — only user/manager allowed
     const allowedRoles = ['user', 'manager'];
     const assignedRole = allowedRoles.includes(role) ? role : 'user';
-    const newUser = new User({ username, email, password: hashed, role: assignedRole });
+    // New user starts with no TOTP — they configure Authenticator on first login
+    const newUser = new User({
+      username, email, password: hashed, role: assignedRole,
+      twoFactorEnabled: false,
+      twoFactorSecret: undefined,
+      twoFactorPendingSecret: undefined,
+    });
     await newUser.save();
 
     const userObj = newUser.toObject();
