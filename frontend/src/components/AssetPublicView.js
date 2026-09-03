@@ -18,6 +18,29 @@ const STATUS_STYLE = {
   Damaged:     { bg: '#4a1515', color: '#f87171', border: '#ef4444' },
 };
 
+/**
+ * Decode a JWT payload without verifying the signature (client-side only).
+ * Used solely to check the 'exp' claim so we can detect a stale localStorage token
+ * before attempting a backend call. The server still verifies the signature.
+ */
+function jwtExpired(token) {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    // exp is seconds since epoch
+    return payload.exp && Date.now() / 1000 > payload.exp;
+  } catch {
+    return true; // unparseable → treat as expired
+  }
+}
+
+/**
+ * Clear the stale session from localStorage and reset login state.
+ */
+function clearSession() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+}
+
 export default function AssetPublicView() {
   const { assetId } = useParams();
   const navigate = useNavigate();
@@ -25,7 +48,15 @@ export default function AssetPublicView() {
   const scannedBy = searchParams.get('source') === 'pc' ? 'PC Scan' : 'Mobile Scan';
 
   // ── ALL hooks declared unconditionally first ──
-  const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem('token'));
+  // isLoggedIn: true only if token exists AND is not expired
+  const [isLoggedIn, setIsLoggedIn] = useState(() => {
+    const t = localStorage.getItem('token');
+    if (!t || jwtExpired(t)) {
+      if (t) clearSession(); // purge stale token immediately
+      return false;
+    }
+    return true;
+  });
   const [showLoginGate, setShowLoginGate] = useState(false);
   const [loginForm, setLoginForm] = useState({ identifier: '', password: '' });
   const [loginError, setLoginError] = useState('');
@@ -93,7 +124,12 @@ export default function AssetPublicView() {
    *   logged in, valid updateToken → go straight to update view
    */
   const handleUpdateClick = () => {
-    if (!isLoggedIn) {
+    // Re-check token expiry at click time — it may have expired while the page was open
+    const storedToken = localStorage.getItem('token');
+    if (!isLoggedIn || !storedToken || jwtExpired(storedToken)) {
+      clearSession();
+      setIsLoggedIn(false);
+      setUpdateToken(null);
       setShowLoginGate(true);
       return;
     }
@@ -191,6 +227,19 @@ export default function AssetPublicView() {
     setTotpError('');
     try {
       const token = localStorage.getItem('token');
+
+      // Guard: if token has expired since the modal opened, bail to login
+      if (!token || jwtExpired(token)) {
+        clearSession();
+        setIsLoggedIn(false);
+        setUpdateToken(null);
+        setShowTotpModal(false);
+        setTotpInput('');
+        setLoginError('Your session has expired. Please log in again.');
+        setShowLoginGate(true);
+        return;
+      }
+
       const encodedId = encodeURIComponent(assetId);
       const res = await axios.post(
         `${API_URL}/assets/public/${encodedId}/verify-update`,
@@ -203,7 +252,24 @@ export default function AssetPublicView() {
       setTotpInput('');
       setView('update');
     } catch (err) {
-      setTotpError(err.response?.data?.message || 'Invalid Authenticator code. Please try again.');
+      const status = err.response?.status;
+      const msg = err.response?.data?.message || '';
+
+      if (status === 401) {
+        // Session token expired or invalid — clear it and force re-login
+        clearSession();
+        setIsLoggedIn(false);
+        setUpdateToken(null);
+        setShowTotpModal(false);
+        setTotpInput('');
+        setLoginError('Your session has expired. Please log in again.');
+        setShowLoginGate(true);
+      } else if (status === 400 && msg.toLowerCase().includes('not set up')) {
+        setTotpError('Authenticator is not set up for your account. Please complete 2FA setup first.');
+      } else {
+        // 400 invalid code or any other error
+        setTotpError(msg || 'Invalid Authenticator code. Please try again.');
+      }
     } finally {
       setTotpLoading(false);
     }
@@ -264,9 +330,17 @@ export default function AssetPublicView() {
         setSubmitSuccess(true);
       }
     } catch (err) {
+      const status = err.response?.status;
       const msg = err.response?.data?.message || 'Update failed. Try again.';
-      // If the backend rejected the update token (expired / mismatched), clear it
-      if (err.response?.status === 403) {
+      if (status === 401) {
+        // Session expired mid-flow
+        clearSession();
+        setIsLoggedIn(false);
+        setUpdateToken(null);
+        setView('details');
+        setSubmitError('Your session expired. Please log in and verify again.');
+      } else if (status === 403) {
+        // Update token expired or mismatched — re-verify
         setUpdateToken(null);
         setSubmitError(msg + ' Please verify your Authenticator code again.');
         setTotpInput('');

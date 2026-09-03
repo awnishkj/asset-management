@@ -18,6 +18,8 @@ module.exports = async (req, res, next) => {
     req.currentUser = user;
     next();
   } catch (error) {
+    // Diagnostic: log WHY the JWT failed (never logs the token itself)
+    console.error('[auth-middleware] JWT verify failed — reason:', error.message, '| path:', req.path, '| method:', req.method);
     return res.status(401).json({ message: 'Invalid or expired token' });
   }
 };

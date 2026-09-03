@@ -99,23 +99,48 @@ router.get('/public-list', async (req, res) => {
 // Returns:  { updateToken } — short-lived JWT tied to userId + assetId
 router.post('/public/:assetId/verify-update', authMiddleware, async (req, res) => {
   try {
+    // ── DIAGNOSTIC (safe — no code/secret/JWT logged) ──────────────────────
+    console.log('[verify-update] req.userId:', req.userId, '| type:', typeof req.userId);
+    console.log('[verify-update] assetId param (raw):', req.params.assetId);
+    console.log('[verify-update] body keys:', Object.keys(req.body));
+    console.log('[verify-update] totpCode present:', !!req.body.totpCode, '| length:', String(req.body.totpCode || '').trim().length);
+    // ── END DIAGNOSTIC ─────────────────────────────────────────────────────
+
     const { totpCode } = req.body;
     if (!totpCode || String(totpCode).trim() === '') {
+      console.log('[verify-update] FAIL: empty code');
       return res.status(400).json({ message: 'Authenticator code is required.' });
     }
 
     // Load the authenticated user's TOTP secret — never trust anything from the frontend
-    const user = await User.findById(req.userId).select('twoFactorSecret twoFactorEnabled');
+    const user = await User.findById(req.userId).select('twoFactorSecret twoFactorEnabled username');
+    console.log('[verify-update] user found:', !!user, '| twoFactorEnabled:', user?.twoFactorEnabled, '| hasSecret:', !!user?.twoFactorSecret, '| secretLength:', user?.twoFactorSecret?.length ?? 0);
+
     if (!user) {
+      console.log('[verify-update] FAIL: user not found for userId:', req.userId);
       return res.status(401).json({ message: 'User not found.' });
     }
     if (!user.twoFactorEnabled || !user.twoFactorSecret) {
+      console.log('[verify-update] FAIL: 2FA not set up for user:', user.username);
       return res.status(400).json({ message: 'Authenticator app is not set up for your account. Please complete 2FA setup first.' });
     }
 
-    // Verify TOTP — do NOT log the code
-    const valid = totpVerify(String(totpCode).trim(), user.twoFactorSecret);
+    // Verify TOTP — do NOT log the code or secret
+    let verifyResult;
+    let verifyError = null;
+    try {
+      verifyResult = verifySync({ type: 'totp', token: String(totpCode).trim(), secret: user.twoFactorSecret });
+    } catch (e) {
+      verifyError = e.message;
+    }
+    console.log('[verify-update] verifySync result type:', typeof verifyResult, '| result shape:', JSON.stringify(verifyResult), '| error:', verifyError);
+
+    const valid = !verifyError && verifyResult && verifyResult.valid === true;
+    console.log('[verify-update] valid:', valid);
+
     if (!valid) {
+      const msg = verifyError ? `TOTP verify threw: ${verifyError}` : 'Invalid Authenticator code. Please try again.';
+      console.log('[verify-update] FAIL:', msg);
       return res.status(400).json({ message: 'Invalid Authenticator code. Please try again.' });
     }
 
@@ -132,7 +157,8 @@ router.post('/public/:assetId/verify-update', authMiddleware, async (req, res) =
       { expiresIn: '5m' }
     );
 
-    console.log('[assets] TOTP update-verification granted for userId:', req.userId, 'assetId:', assetId);
+    const decoded = jwt.decode(updateToken);
+    console.log('[verify-update] SUCCESS — userId:', req.userId, '| assetId:', assetId, '| token exp (UTC):', new Date(decoded.exp * 1000).toISOString());
 
     return res.json({ updateToken, message: 'Verification successful. You may now update the asset.' });
   } catch (err) {
