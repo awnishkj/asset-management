@@ -23,7 +23,8 @@
 
 | Feature | Description |
 |---|---|
-| 🔐 **Auth + 2FA** | JWT login with email-based two-factor authentication |
+| 🔐 **Auth + Authenticator 2FA** | JWT login with TOTP two-factor authentication via Google/Microsoft Authenticator |
+| 🛡️ **QR Update Verification** | Authenticator code required before updating any asset from a QR scan |
 | 📦 **Asset Management** | Full CRUD — create, update, delete, search assets |
 | 📱 **QR Code Generator** | Generate & download printable QR codes per asset |
 | 🔍 **QR Scanner** | Scan via camera or upload image — works on any device |
@@ -32,7 +33,7 @@
 | 📊 **Dashboard** | Live stats, status charts, recent activity |
 | 🕓 **Scan History** | Full timeline of every scan with location & remarks |
 | 👥 **User Roles** | Admin / Manager / User role-based access control |
-| 📧 **Email Notifications** | Resend HTTP API for 2FA OTP & password reset (works on Render Free) |
+| 📧 **Email Notifications** | Resend HTTP API for password reset (works on Render Free) |
 
 ---
 
@@ -44,9 +45,10 @@ Frontend          Backend           Database        Infra
 React 18          Node.js           MongoDB Atlas   Cloudflare Tunnel
 React Router 6    Express.js        Mongoose        Render (backend)
 Axios             JWT + bcryptjs    ─────────       nodemon
-Chart.js          Resend (email)
-Leaflet Maps      QRCode / jsQR
-qrcode.react      express-validator
+Chart.js          otplib v13 (TOTP)
+Leaflet Maps      Resend (email)
+qrcode.react      QRCode / jsQR
+                  express-validator
 ```
 
 ---
@@ -227,29 +229,32 @@ Neither + production   → Error thrown      ❌ configure a provider
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/auth/register` | Register user |
-| POST | `/api/auth/login` | Login (triggers 2FA) |
-| POST | `/api/auth/verify-2fa` | Verify OTP code |
-| POST | `/api/auth/resend-2fa` | Resend OTP |
-| POST | `/api/auth/qr-login` | Login from QR scan (no 2FA) |
-| POST | `/api/auth/forgot-password` | Send reset code |
-| POST | `/api/auth/reset-password` | Reset password |
+| POST | `/api/auth/login` | Login — returns TOTP challenge on first use, issues `twoFactorToken` |
+| POST | `/api/auth/verify-2fa` | Verify Authenticator code → issues full JWT |
+| POST | `/api/auth/resend-2fa` | N/A — Authenticator codes cannot be resent |
+| POST | `/api/auth/qr-login` | Login from QR scan (password + TOTP required) |
+| POST | `/api/auth/forgot-password` | Begin password reset — verify account |
+| POST | `/api/auth/forgot-password/verify-totp` | Verify Authenticator code → issues `passwordResetToken` |
+| POST | `/api/auth/reset-password` | Apply new password using `passwordResetToken` |
 
 </details>
 
 <details>
 <summary><strong>Assets</strong></summary>
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/assets` | List all assets |
-| POST | `/api/assets` | Create asset |
-| GET | `/api/assets/:id` | Get asset by ID |
-| PUT | `/api/assets/:id` | Update asset |
-| DELETE | `/api/assets/:id` | Delete asset |
-| GET | `/api/assets/stats/overview` | Dashboard stats |
-| GET | `/api/assets/public/:assetId` | Public asset lookup (no auth) |
-| POST | `/api/assets/public/:assetId/update` | Public update from scan |
-| GET | `/api/assets/public/:assetId/history` | Scan history (no auth) |
+| Method | Endpoint | Auth required | Description |
+|--------|----------|---------------|-------------|
+| GET | `/api/assets` | ✅ JWT | List all assets |
+| POST | `/api/assets` | ✅ JWT | Create asset |
+| GET | `/api/assets/:id` | ✅ JWT | Get asset by MongoDB `_id` |
+| PUT | `/api/assets/:id` | ✅ JWT | Update asset (dashboard) |
+| DELETE | `/api/assets/:id` | ✅ JWT | Delete asset |
+| GET | `/api/assets/stats/overview` | ✅ JWT | Dashboard stats |
+| GET | `/api/assets/public-list` | ❌ none | List all assets (public) |
+| GET | `/api/assets/public/:assetId` | ❌ none | Public asset lookup by assetId |
+| POST | `/api/assets/public/:assetId/verify-update` | ✅ JWT | Verify Authenticator code → returns 5-min `updateToken` |
+| POST | `/api/assets/public/:assetId/update` | ✅ JWT + `X-Update-Token` | Update asset from QR scan |
+| GET | `/api/assets/public/:assetId/history` | ❌ none | Scan location history |
 
 </details>
 
@@ -309,16 +314,23 @@ Neither + production   → Error thrown      ❌ configure a provider
 
 ```js
 {
-  username:       String  // unique
-  email:          String  // unique
-  password:       String  // bcrypt hashed
-  role:           String  // admin | manager | user
-  phone:          String
-  empId:          String
-  twoFactorCode:  String
-  twoFactorExpires: Date
-  twoFactorEnabled: Boolean
-  createdAt:      Date
+  username:              String   // unique
+  email:                 String   // unique
+  password:              String   // bcrypt hashed
+  role:                  String   // admin | manager | user
+  phone:                 String
+  empId:                 String
+  location:              String
+  profilePic:            String
+  twoFactorEnabled:      Boolean  // true once Authenticator setup is complete
+  twoFactorSecret:       String   // permanent TOTP secret (Base32, never sent to client)
+  twoFactorPendingSecret: String  // temporary secret during first-login TOTP setup
+  twoFactorCode:         String   // legacy field (admin OTP only)
+  twoFactorExpires:      Date     // legacy field (admin OTP only)
+  notificationPrefs:     Object
+  rememberMe:            Boolean
+  joinedAt:              Date
+  createdAt:             Date
 }
 ```
 
@@ -349,11 +361,52 @@ Neither + production   → Error thrown      ❌ configure a provider
 
 - Passwords hashed with **bcryptjs** (salt rounds: 10)
 - **JWT** tokens with configurable expiry (7d / 30d with Remember Me)
-- **2FA** via email OTP on every login — delivered via Resend HTTP API
+- **Authenticator 2FA** via TOTP (otplib v13) on every login — compatible with Google Authenticator and Microsoft Authenticator. No email codes for login.
+- **QR scan update verification** — every asset update from a QR scan requires a fresh 6-digit Authenticator code. The code is verified against the **logged-in user's own** `twoFactorSecret` (read server-side from MongoDB). The backend never accepts a user identity from the frontend.
+- Short-lived **asset-update tokens** (5-minute signed JWT, `{ purpose, userId, assetId }`) gate the actual update endpoint. Tokens are asset-scoped — a token for Asset A cannot authorise an update to Asset B. Cross-user replay is blocked: `payload.userId` must match `req.userId` from the authenticated session.
+- TOTP codes are never stored, logged, or returned in any API response. `twoFactorSecret` is never included in any JWT sent to the browser.
 - `.env` files excluded from version control
 - Input validation via **express-validator**
 - CORS enabled for cross-origin requests
-- Email credentials never logged or exposed in error responses
+
+### Authentication flow
+
+```
+First login
+  POST /auth/login (password correct, no twoFactorSecret yet)
+    → returns twoFactorToken (10-min JWT) + QR code PNG
+  User scans QR with Authenticator app
+  POST /auth/verify-2fa { code, twoFactorToken }
+    → promotes twoFactorPendingSecret → twoFactorSecret
+    → returns full session JWT
+
+Subsequent logins
+  POST /auth/login (password correct)
+    → returns twoFactorToken (10-min JWT)
+  POST /auth/verify-2fa { code, twoFactorToken }
+    → verifies TOTP against user.twoFactorSecret
+    → returns full session JWT
+
+QR scan asset update
+  User scans QR → asset details page opens (no auth required to view)
+  User clicks "Update Asset"
+    → if not logged in: login gate → login → TOTP modal
+    → if logged in: TOTP modal
+  POST /assets/public/:assetId/verify-update  (Bearer JWT + { totpCode })
+    → backend reads req.userId from JWT (never from body)
+    → loads User.twoFactorSecret from MongoDB
+    → verifySync(totpCode, user.twoFactorSecret)
+    → on success: returns updateToken (5-min JWT, purpose=asset-update, userId, assetId)
+  Frontend stores updateToken in component state only (never localStorage)
+  POST /assets/public/:assetId/update  (Bearer JWT + X-Update-Token header)
+    → authMiddleware validates Bearer JWT → sets req.userId
+    → requireUpdateToken validates X-Update-Token:
+        purpose === 'asset-update'
+        payload.userId === req.userId
+        payload.assetId === URL assetId
+        not expired
+    → asset updated
+```
 
 ---
 

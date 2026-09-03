@@ -61,21 +61,50 @@ Application will be available at `http://localhost:3000`
 #### Register User
 ```
 POST /api/auth/register
-Body: {
-  username: string,
-  email: string,
-  password: string
-}
+Body: { username, email, password }
 ```
 
 #### Login
 ```
 POST /api/auth/login
-Body: {
-  email: string,
-  password: string,
-  rememberMe: boolean
-}
+Body: { identifier, password, rememberMe }
+
+First login (no Authenticator set up yet):
+  Response: { twoFactor: true, setup: true, twoFactorToken, qrCode, manualKey }
+  → Scan the QR with Google/Microsoft Authenticator, then call /verify-2fa
+
+Subsequent logins:
+  Response: { twoFactor: true, setup: false, twoFactorToken }
+  → Call /verify-2fa with current Authenticator code
+```
+
+#### Verify Authenticator (2FA)
+```
+POST /api/auth/verify-2fa
+Headers: Authorization: Bearer <twoFactorToken>
+Body: { code, twoFactorToken }
+Response: { token, user }  — full session JWT
+```
+
+#### QR Login (from asset scan page)
+```
+POST /api/auth/qr-login
+Body: { identifier, password, totpCode }
+Response: { token, user }
+```
+
+#### Forgot Password
+```
+POST /api/auth/forgot-password
+Body: { email }
+Response: { resetStepToken }
+
+POST /api/auth/forgot-password/verify-totp
+Body: { resetStepToken, totpCode }
+Response: { passwordResetToken }
+
+POST /api/auth/reset-password
+Body: { passwordResetToken, newPassword }
 ```
 
 ### Asset Endpoints
@@ -103,10 +132,41 @@ Body: {
 }
 ```
 
-#### Update Asset
+#### Update Asset (dashboard)
 ```
 PUT /api/assets/:id
+Headers: Authorization: Bearer <jwt>
 Body: { asset fields to update }
+```
+
+#### Verify Authenticator for Asset Update (QR scan flow)
+```
+POST /api/assets/public/:assetId/verify-update
+Headers: Authorization: Bearer <jwt>
+Body: { totpCode }
+Response: { updateToken }  — 5-minute signed JWT, tied to userId + assetId
+
+Security rules enforced:
+  - req.userId comes from the authenticated JWT only (never from req.body)
+  - TOTP verified against that user's own twoFactorSecret from MongoDB
+  - updateToken contains { purpose: 'asset-update', userId, assetId }
+  - updateToken is stored in React component state only — never in localStorage
+```
+
+#### Update Asset from QR Scan (protected)
+```
+POST /api/assets/public/:assetId/update
+Headers:
+  Authorization: Bearer <jwt>
+  X-Update-Token: <updateToken>
+Body: { status, location, latitude, longitude, remarks, scannedBy, updatedBy }
+
+Backend checks (all must pass or 403 is returned):
+  1. Bearer JWT valid and not expired
+  2. X-Update-Token valid and not expired
+  3. updateToken.purpose === 'asset-update'
+  4. updateToken.userId === req.userId (from Bearer JWT)
+  5. updateToken.assetId === URL :assetId
 ```
 
 #### Delete Asset
@@ -191,34 +251,26 @@ Update `MONGODB_URI` in `.env` with your connection string.
 - Use MongoDB Compass to inspect database
 - Use Postman to test API endpoints
 
-### Email / 2FA (SMTP)
+### Authenticator 2FA (TOTP)
 
-- The app sends 2FA codes via email. In development, if SMTP is not configured, the server falls back to Nodemailer Ethereal (test) accounts and logs a preview URL to the backend console. Open that preview URL in your browser to view the sent email.
-- To enable real email delivery, set the SMTP environment variables in `backend/.env` or your environment (see `.env.example`). Recommended providers: Gmail (use App Password), Mailgun, SendGrid, or Mailtrap for testing.
+AssetTrack uses **TOTP** (Time-based One-Time Password) via **otplib v13**. No email is sent for login.
 
-Gmail (App Password) quick setup:
+**First-time setup:**
+1. Log in with username + password.
+2. The server generates a TOTP secret, stores it as `twoFactorPendingSecret`, and returns a QR code PNG.
+3. Scan the QR in Google Authenticator or Microsoft Authenticator.
+4. Enter the 6-digit code → secret is promoted to `twoFactorSecret`, `twoFactorEnabled` set to `true`.
+5. All subsequent logins require the Authenticator code.
 
-1. Enable 2-Step Verification on your Google account.
-2. Go to Google Account → Security → App Passwords.
-3. Create a new App Password for "Mail" and copy it.
-4. In `backend/.env` set:
+**DEV bypass (development only):**
+Set `SKIP_2FA=true` in `backend/.env` to skip the TOTP step during development. Never use in production.
+
 ```env
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=awnishkj2004@gmail.com
-SMTP_PASS=your_app_password_here
-SMTP_FROM=awnishkj2004@gmail.com
-SMTP_SECURE=false
+SKIP_2FA=true   # backend/.env — skips 2FA entirely in NODE_ENV=development
 ```
 
-If you are testing locally and do not want to use Gmail yet, leave SMTP values blank and the app will use Ethereal in development only.
-
-Mailtrap / MailHog (local testing):
-
-- Mailtrap: sign up for Mailtrap, get SMTP credentials, and set them in `.env`. Emails are captured in your Mailtrap inbox.
-- MailHog: run MailHog locally and point `SMTP_HOST`/`SMTP_PORT` to it; emails will appear at http://localhost:8025.
-
-Security note: Never commit real SMTP credentials to source control. Use environment variables or secret management.
+**QR scan asset update verification:**
+Every asset update from the public QR scan page requires a fresh Authenticator code, even after login. The code is verified against the currently logged-in user's `twoFactorSecret` — the backend reads the user from the JWT, not from anything the frontend sends. A 5-minute `updateToken` is issued and must be passed as `X-Update-Token` on the actual update request.
 
 ### Frontend Debugging
 - Use browser DevTools (F12)
