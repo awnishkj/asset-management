@@ -11,7 +11,7 @@
 [![MongoDB](https://img.shields.io/badge/MongoDB-Mongoose-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://mongodb.com)
 [![JWT](https://img.shields.io/badge/Auth-JWT-000000?style=for-the-badge&logo=jsonwebtokens&logoColor=white)](https://jwt.io)
 [![MongoDB Atlas](https://img.shields.io/badge/MongoDB-Atlas-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://mongodb.com/atlas)
-[![Resend](https://img.shields.io/badge/Email-Resend-000000?style=for-the-badge&logo=mail.ru&logoColor=white)](https://resend.com)
+[![SendGrid](https://img.shields.io/badge/Email-SendGrid-1A82E2?style=for-the-badge&logo=mail.ru&logoColor=white)](https://sendgrid.com)
 
 *Track any asset, anywhere, with a QR code scan.*
 
@@ -29,11 +29,11 @@
 | 📱 **QR Code Generator** | Generate & download printable QR codes per asset |
 | 🔍 **QR Scanner** | Scan via camera or upload image — works on any device |
 | 🌍 **Public Asset View** | Scan QR on any network → opens asset page instantly |
-| 📍 **Location Tracking** | GPS coordinates + manual location on every scan |
+| 📍 **Location Tracking** | Manual location entry on every scan |
 | 📊 **Dashboard** | Live stats, status charts, recent activity |
 | 🕓 **Scan History** | Full timeline of every scan with location & remarks |
 | 👥 **User Roles** | Admin / Manager / User role-based access control |
-| 📧 **Email Notifications** | Resend HTTP API for password reset (works on Render Free) |
+| 📧 **Email Notifications** | SendGrid Web API for password reset (works on Render Free) |
 
 ---
 
@@ -46,7 +46,7 @@ React 18          Node.js           MongoDB Atlas   Cloudflare Tunnel
 React Router 6    Express.js        Mongoose        Render (backend)
 Axios             JWT + bcryptjs    ─────────       nodemon
 Chart.js          otplib v13 (TOTP)
-Leaflet Maps      Resend (email)
+Leaflet Maps      SendGrid Web API (email)
 qrcode.react      QRCode / jsQR
                   express-validator
 ```
@@ -62,7 +62,7 @@ asset-management/
 │   ├── routes/              # API routes (auth, assets, qr, users, scanHistory)
 │   ├── middleware/          # JWT auth middleware
 │   ├── services/
-│   │   └── email.js         # Email abstraction (Resend → SMTP → Ethereal fallback)
+│   │   └── email.js         # Email delivery via SendGrid Web API v3
 │   ├── server.js            # Express entry point + QR redirect route
 │   └── package.json
 │
@@ -111,8 +111,8 @@ NODE_ENV=development
 MONGODB_URI=mongodb+srv://<user>:<pass>@cluster.mongodb.net/assettrack?retryWrites=true&w=majority
 JWT_SECRET=your_secret_here
 
-# Email — Option A: Resend HTTP API (required for Render Free, recommended everywhere)
-RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
+# Email — SendGrid Web API (works on Render Free, no SMTP ports needed)
+SENDGRID_API_KEY=SG.xxxxxxxxxxxxxxxxxxxx
 EMAIL_FROM=AssetTrack <no-reply@yourdomain.com>
 
 # Email — Option B: Gmail SMTP (local dev only — blocked on Render Free)
@@ -171,32 +171,30 @@ Run `START.ps1` — it auto-updates both `.env` files with fresh tunnel URLs eve
 
 ---
 
-## 📧 Email Setup (Resend)
+## 📧 Email Setup (SendGrid)
 
-Email is used for **2FA login codes** and **password reset**. The app uses [Resend](https://resend.com) HTTP API — works on Render Free (which blocks SMTP ports 25/465/587).
-
-### Why not Gmail SMTP?
-Render Free web services block all outbound SMTP traffic. Resend uses HTTPS so it works everywhere.
+Email is used for **password reset**. The app uses the [SendGrid](https://sendgrid.com) Web API v3 over HTTPS — works on Render Free (which blocks SMTP ports 25/465/587).
 
 ### Setup (2 minutes)
-1. Sign up at **[resend.com](https://resend.com)** (free — 3,000 emails/month)
-2. Go to **API Keys** → Create → copy the key starting with `re_`
-3. Set in your environment:
+1. Sign up at **[sendgrid.com](https://sendgrid.com)** (free tier — 100 emails/day)
+2. Go to **Settings → API Keys** → Create API Key → copy the key starting with `SG.`
+3. Verify a sender address under **Settings → Sender Authentication**
+4. Set in your environment:
 
 ```env
-RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
+SENDGRID_API_KEY=SG.xxxxxxxxxxxxxxxxxxxx
 EMAIL_FROM=AssetTrack <no-reply@yourdomain.com>
 ```
 
-> If you don't have a custom domain yet, leave `EMAIL_FROM` blank — it defaults to `onboarding@resend.dev` which only delivers to your own verified Resend email address (fine for testing).
-
-### Email provider selection logic
-```
-RESEND_API_KEY set?    → Resend HTTP API   ✅ production / Render
-SMTP_HOST+USER+PASS?   → Nodemailer SMTP   ✅ local dev / self-hosted
-Neither + development  → Ethereal test     ✅ dev fallback (logs preview URL)
-Neither + production   → Error thrown      ❌ configure a provider
-```
+### Required Render Environment Variables
+| Variable | Value |
+|---|---|
+| `NODE_ENV` | `production` |
+| `MONGODB_URI` | Your Atlas connection string |
+| `JWT_SECRET` | Strong random string |
+| `SENDGRID_API_KEY` | From [sendgrid.com](https://sendgrid.com) |
+| `EMAIL_FROM` | `AssetTrack <no-reply@yourdomain.com>` |
+| `FRONTEND_URL` | Your deployed frontend URL |
 
 ---
 
@@ -208,16 +206,6 @@ Neither + production   → Error thrown      ❌ configure a provider
 | Build Command | `cd backend && npm install` |
 | Start Command | `cd backend && node server.js` |
 | Port | auto-detected via `process.env.PORT` |
-
-### Required Render Environment Variables
-| Variable | Value |
-|---|---|
-| `NODE_ENV` | `production` |
-| `MONGODB_URI` | Your Atlas connection string |
-| `JWT_SECRET` | Strong random string |
-| `RESEND_API_KEY` | From [resend.com](https://resend.com) |
-| `EMAIL_FROM` | `AssetTrack <no-reply@yourdomain.com>` |
-| `FRONTEND_URL` | Your deployed frontend URL |
 
 ---
 
