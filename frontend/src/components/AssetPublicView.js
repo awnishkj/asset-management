@@ -26,7 +26,7 @@ export default function AssetPublicView() {
 
   // ── ALL hooks declared unconditionally first ──
   const [isLoggedIn, setIsLoggedIn] = useState(() => !!localStorage.getItem('token'));
-  const [showLoginGate, setShowLoginGate] = useState(false); // show login only when user clicks Update
+  const [showLoginGate, setShowLoginGate] = useState(false);
   const [loginForm, setLoginForm] = useState({ identifier: '', password: '' });
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
@@ -34,11 +34,19 @@ export default function AssetPublicView() {
   const [twoFactorToken, setTwoFactorToken] = useState('');
   const [twoFactorCode, setTwoFactorCode] = useState('');
 
+  // ── TOTP verification modal state ──
+  const [showTotpModal, setShowTotpModal] = useState(false);
+  const [totpInput, setTotpInput] = useState('');
+  const [totpError, setTotpError] = useState('');
+  const [totpLoading, setTotpLoading] = useState(false);
+  // updateToken is held only in component state — never persisted to localStorage/sessionStorage
+  const [updateToken, setUpdateToken] = useState(null);
+
   const [asset, setAsset] = useState(null);
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [view, setView] = useState('details'); // start on details view
+  const [view, setView] = useState('details');
   const [form, setForm] = useState({ status: 'Active', latitude: '', longitude: '', location: '', remarks: '' });
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -65,27 +73,42 @@ export default function AssetPublicView() {
     } catch { /* ignore */ }
   }, [assetId]);
 
-  // Always fetch asset on load — no login needed to view
   useEffect(() => {
     fetchAsset();
     fetchHistory();
   }, [fetchAsset, fetchHistory]);
 
+  // Clear the update token whenever the asset changes (navigating away and back)
+  useEffect(() => {
+    setUpdateToken(null);
+  }, [assetId]);
+
   // ── Handlers ──
+
+  /**
+   * Called when the user clicks "Update Asset".
+   * Flow:
+   *   not logged in  → show login gate first
+   *   logged in, no updateToken → show TOTP modal
+   *   logged in, valid updateToken → go straight to update view
+   */
   const handleUpdateClick = () => {
-    if (isLoggedIn) {
-      setView('update');
-    } else {
+    if (!isLoggedIn) {
       setShowLoginGate(true);
+      return;
     }
+    // Always require a fresh TOTP verification — never trust a stale token
+    setTotpInput('');
+    setTotpError('');
+    setShowTotpModal(true);
   };
 
+  // ── Login gate ──
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginLoading(true);
     setLoginError('');
     try {
-      // Try qr-login first (no 2FA, fastest path)
       const res = await axios.post(`${API_URL}/auth/qr-login`, {
         identifier: loginForm.identifier,
         password: loginForm.password,
@@ -94,9 +117,11 @@ export default function AssetPublicView() {
       localStorage.setItem('user', JSON.stringify(res.data.user));
       setIsLoggedIn(true);
       setShowLoginGate(false);
-      setView('update');
+      // After login, immediately prompt for TOTP verification
+      setTotpInput('');
+      setTotpError('');
+      setShowTotpModal(true);
     } catch (err) {
-      // qr-login failed — fall back to regular login (handles 2FA flow too)
       try {
         const res2 = await axios.post(`${API_URL}/auth/login`, {
           identifier: loginForm.identifier,
@@ -106,13 +131,15 @@ export default function AssetPublicView() {
         if (res2.data?.twoFactor) {
           setTwoFactorToken(res2.data.twoFactorToken || '');
           setTwoFactorPending(true);
-          setLoginError('A verification code was sent to your email. Enter it below.');
+          setLoginError('Enter the 6-digit code from your Authenticator app.');
         } else {
           localStorage.setItem('token', res2.data.token);
           localStorage.setItem('user', JSON.stringify(res2.data.user));
           setIsLoggedIn(true);
           setShowLoginGate(false);
-          setView('update');
+          setTotpInput('');
+          setTotpError('');
+          setShowTotpModal(true);
         }
       } catch (err2) {
         setLoginError(err2.response?.data?.message || err.response?.data?.message || 'Invalid credentials');
@@ -127,7 +154,8 @@ export default function AssetPublicView() {
     setLoginLoading(true);
     setLoginError('');
     try {
-      const res = await axios.post(`${API_URL}/auth/verify-2fa`,
+      const res = await axios.post(
+        `${API_URL}/auth/verify-2fa`,
         { code: twoFactorCode, twoFactorToken },
         { headers: { Authorization: `Bearer ${twoFactorToken}` } }
       );
@@ -136,7 +164,10 @@ export default function AssetPublicView() {
       setIsLoggedIn(true);
       setShowLoginGate(false);
       setTwoFactorPending(false);
-      setView('update');
+      // After completing 2FA login, prompt for TOTP update verification
+      setTotpInput('');
+      setTotpError('');
+      setShowTotpModal(true);
     } catch (err) {
       setLoginError(err.response?.data?.message || 'Invalid code');
     } finally {
@@ -144,37 +175,115 @@ export default function AssetPublicView() {
     }
   };
 
+  // ── TOTP update-verification modal ──
+  const handleTotpVerify = async (e) => {
+    e.preventDefault();
+    const code = totpInput.trim();
+    if (!code) {
+      setTotpError('Please enter the 6-digit code from your Authenticator app.');
+      return;
+    }
+    if (!/^\d{6}$/.test(code)) {
+      setTotpError('Code must be exactly 6 digits.');
+      return;
+    }
+    setTotpLoading(true);
+    setTotpError('');
+    try {
+      const token = localStorage.getItem('token');
+      const encodedId = encodeURIComponent(assetId);
+      const res = await axios.post(
+        `${API_URL}/assets/public/${encodedId}/verify-update`,
+        { totpCode: code },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Store the update token in component state only — not in localStorage
+      setUpdateToken(res.data.updateToken);
+      setShowTotpModal(false);
+      setTotpInput('');
+      setView('update');
+    } catch (err) {
+      setTotpError(err.response?.data?.message || 'Invalid Authenticator code. Please try again.');
+    } finally {
+      setTotpLoading(false);
+    }
+  };
+
+  const handleTotpCancel = () => {
+    setShowTotpModal(false);
+    setTotpInput('');
+    setTotpError('');
+  };
+
+  // ── Asset update submit ──
   const handleSubmit = async () => {
+    if (!updateToken) {
+      setSubmitError('Update authorisation has expired. Please verify your Authenticator code again.');
+      // Re-open TOTP modal so the user can re-verify without reloading
+      setTotpInput('');
+      setTotpError('');
+      setShowTotpModal(true);
+      return;
+    }
     setSubmitting(true);
     setSubmitError('');
     try {
       const encodedId = encodeURIComponent(assetId);
-      // Get logged-in username from localStorage if available
       const storedUser = localStorage.getItem('user');
       const loggedInUser = storedUser ? JSON.parse(storedUser) : null;
       const updatedBy = loggedInUser?.username || loggedInUser?.email || null;
+      const token = localStorage.getItem('token');
 
-      await axios.post(`${API_URL}/assets/public/${encodedId}/update`, {
-        status: form.status,
-        latitude: form.latitude || undefined,
-        longitude: form.longitude || undefined,
-        location: form.location || undefined,
-        remarks: form.remarks || undefined,
-        scannedBy: scannedBy,
-        updatedBy: updatedBy,
-      });
-      const loggedInNow = !!localStorage.getItem('token');
+      await axios.post(
+        `${API_URL}/assets/public/${encodedId}/update`,
+        {
+          status:    form.status,
+          latitude:  form.latitude  || undefined,
+          longitude: form.longitude || undefined,
+          location:  form.location  || undefined,
+          remarks:   form.remarks   || undefined,
+          scannedBy: scannedBy,
+          updatedBy: updatedBy,
+        },
+        {
+          headers: {
+            Authorization:    `Bearer ${token}`,
+            'X-Update-Token': updateToken,
+          },
+        }
+      );
+
+      // Invalidate the update token immediately after a successful update
+      setUpdateToken(null);
+
       const openedFromPC = searchParams.get('source') === 'pc';
-      if (openedFromPC && loggedInNow) {
+      if (openedFromPC && !!token) {
         window.close();
         navigate('/dashboard');
       } else {
         setSubmitSuccess(true);
-      }    } catch (err) {
-      setSubmitError(err.response?.data?.message || 'Update failed. Try again.');
+      }
+    } catch (err) {
+      const msg = err.response?.data?.message || 'Update failed. Try again.';
+      // If the backend rejected the update token (expired / mismatched), clear it
+      if (err.response?.status === 403) {
+        setUpdateToken(null);
+        setSubmitError(msg + ' Please verify your Authenticator code again.');
+        setTotpInput('');
+        setTotpError('');
+        setShowTotpModal(true);
+      } else {
+        setSubmitError(msg);
+      }
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // ── Back from update view resets the update token ──
+  const handleBackToDetails = () => {
+    setUpdateToken(null);
+    setView('details');
   };
 
   // ── Conditional renders AFTER all hooks ──
@@ -223,7 +332,7 @@ export default function AssetPublicView() {
       {/* Top bar */}
       <div style={S.topBar}>
         {view === 'update'
-          ? <button style={S.backBtn} onClick={() => setView('details')}>←</button>
+          ? <button style={S.backBtn} onClick={handleBackToDetails}>←</button>
           : <span style={{ width: 32 }} />
         }
         <span style={S.topTitle}>{view === 'update' ? 'Update Asset' : 'Asset Details'}</span>
@@ -247,11 +356,16 @@ export default function AssetPublicView() {
                     value={loginForm.password} onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))} required />
                 </>
               ) : (
-                <input style={S.loginInput} type="text" placeholder="Enter 6-digit code from email"
-                  value={twoFactorCode} onChange={e => setTwoFactorCode(e.target.value)}
-                  maxLength={6} inputMode="numeric" required autoFocus />
+                <>
+                  <p style={{ color: '#60a5fa', fontSize: 13, margin: 0, textAlign: 'center' }}>
+                    Enter the 6-digit code from your Authenticator app to complete login.
+                  </p>
+                  <input style={S.loginInput} type="text" placeholder="6-digit Authenticator code"
+                    value={twoFactorCode} onChange={e => setTwoFactorCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    maxLength={6} inputMode="numeric" pattern="\d{6}" required autoFocus />
+                </>
               )}
-              {loginError && <p style={{ color: twoFactorPending ? '#60a5fa' : '#f87171', fontSize: 13, margin: 0 }}>{loginError}</p>}
+              {loginError && <p style={{ color: '#f87171', fontSize: 13, margin: 0 }}>{loginError}</p>}
               <button type="submit" style={S.submitBtn} disabled={loginLoading}>
                 {loginLoading ? (twoFactorPending ? 'Verifying...' : 'Logging in...') : (twoFactorPending ? 'Verify Code' : 'Login')}
               </button>
@@ -266,6 +380,89 @@ export default function AssetPublicView() {
                 Cancel
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── AUTHENTICATOR VERIFICATION MODAL ── */}
+      {showTotpModal && (
+        <div style={S.overlay}>
+          <div style={S.loginCard}>
+            {/* Shield icon */}
+            <div style={{ textAlign: 'center', marginBottom: 12 }}>
+              <span style={{ fontSize: 40, lineHeight: 1 }}>🔐</span>
+            </div>
+            <h2 style={{ color: '#f1f5f9', fontSize: 18, textAlign: 'center', margin: '0 0 6px' }}>
+              Authenticator Verification
+            </h2>
+            <p style={{ color: '#64748b', fontSize: 13, textAlign: 'center', margin: '0 0 20px', lineHeight: 1.5 }}>
+              Enter the 6-digit code from your Authenticator app to continue.
+            </p>
+
+            <form onSubmit={handleTotpVerify} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <input
+                style={{
+                  ...S.loginInput,
+                  textAlign: 'center',
+                  fontSize: 26,
+                  fontWeight: 700,
+                  letterSpacing: 10,
+                  padding: '14px 10px',
+                  color: '#f1f5f9',
+                }}
+                type="text"
+                inputMode="numeric"
+                pattern="\d{6}"
+                maxLength={6}
+                placeholder="000000"
+                value={totpInput}
+                onChange={e => {
+                  setTotpError('');
+                  setTotpInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                }}
+                autoFocus
+                autoComplete="one-time-code"
+              />
+
+              {totpError && (
+                <p style={{ color: '#f87171', fontSize: 13, margin: 0, textAlign: 'center' }}>
+                  {totpError}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                style={{
+                  ...S.submitBtn,
+                  background: totpLoading ? '#16a34a' : '#22c55e',
+                  opacity: totpLoading ? 0.8 : 1,
+                }}
+                disabled={totpLoading}
+              >
+                {totpLoading ? 'Verifying…' : 'Verify'}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTotpCancel}
+                style={{
+                  background: 'none',
+                  border: '1px solid #334155',
+                  borderRadius: 10,
+                  color: '#94a3b8',
+                  fontSize: 14,
+                  padding: '12px',
+                  cursor: 'pointer',
+                  width: '100%',
+                }}
+              >
+                Cancel
+              </button>
+            </form>
+
+            <p style={{ color: '#475569', fontSize: 12, textAlign: 'center', marginTop: 14, lineHeight: 1.5 }}>
+              Open Google Authenticator or Microsoft Authenticator and enter the current code for <strong style={{ color: '#64748b' }}>AssetTrack</strong>.
+            </p>
           </div>
         </div>
       )}
@@ -323,7 +520,7 @@ export default function AssetPublicView() {
             {submitting ? 'Submitting...' : 'Submit Update'}
           </button>
 
-          <button style={S.viewDetailsBtn} onClick={() => setView('details')}>
+          <button style={S.viewDetailsBtn} onClick={handleBackToDetails}>
             View Asset Details
           </button>
         </div>
@@ -352,7 +549,6 @@ export default function AssetPublicView() {
                 </span>
               </div>
             </div>
-
           </div>
 
           {/* Detail rows */}
@@ -517,7 +713,7 @@ const S = {
   overlay: {
     position: 'fixed',
     top: 0, left: 0, right: 0, bottom: 0,
-    background: 'rgba(0,0,0,0.7)',
+    background: 'rgba(0,0,0,0.75)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -533,6 +729,7 @@ const S = {
     padding: '12px 14px',
     outline: 'none',
     width: '100%',
+    boxSizing: 'border-box',
   },
   submitBtn: {
     background: '#22c55e',

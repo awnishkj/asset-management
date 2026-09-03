@@ -1,6 +1,60 @@
 const express = require('express');
 const router = express.Router();
 const Asset = require('../models/Asset');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const authMiddleware = require('../middleware/auth');
+
+// ── otplib v13 — same import pattern as auth.js ──────────────────────────
+const { verifySync } = require('otplib');
+
+/**
+ * Verify a TOTP token against a secret using the shared otplib v13 API.
+ * Returns true if valid, false otherwise. Never logs the token.
+ */
+function totpVerify(token, secret) {
+  try {
+    const result = verifySync({ type: 'totp', token: String(token), secret });
+    return result && result.valid === true;
+  } catch (err) {
+    console.error('[assets] totpVerify error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Middleware: validate the X-Update-Token header for protected update routes.
+ * Checks: JWT signature, purpose='asset-update', userId match (from JWT auth),
+ * assetId match (URL param), and expiry (handled by jwt.verify).
+ *
+ * Attach to any route that requires a prior TOTP verification.
+ * Requires authMiddleware to run first so req.userId is populated.
+ */
+function requireUpdateToken(req, res, next) {
+  const updateToken = req.headers['x-update-token'];
+  if (!updateToken) {
+    return res.status(403).json({ message: 'Asset update requires Authenticator verification. Please verify first.' });
+  }
+  let payload;
+  try {
+    payload = jwt.verify(updateToken, process.env.JWT_SECRET || 'secret');
+  } catch (err) {
+    return res.status(403).json({ message: 'Update authorisation expired or invalid. Please verify again.' });
+  }
+  if (payload.purpose !== 'asset-update') {
+    return res.status(403).json({ message: 'Invalid update token purpose.' });
+  }
+  // userId in token must match the authenticated user (req.userId set by authMiddleware)
+  if (!req.userId || payload.userId !== req.userId) {
+    return res.status(403).json({ message: 'Update token does not match authenticated user.' });
+  }
+  // assetId in token must match the URL param (supports both MongoDB _id and assetId string)
+  const urlAssetId = decodeURIComponent(req.params.id || req.params.assetId || '');
+  if (payload.assetId !== urlAssetId) {
+    return res.status(403).json({ message: 'Update token is not valid for this asset.' });
+  }
+  next();
+}
 
 // Get all assets
 router.get('/', async (req, res) => {
@@ -39,6 +93,54 @@ router.get('/public-list', async (req, res) => {
   }
 });
 
+// ── TOTP Verification for asset update (authenticated users only) ─────────
+// POST /api/assets/public/:assetId/verify-update
+// Requires: Bearer JWT (logged-in user), body: { totpCode }
+// Returns:  { updateToken } — short-lived JWT tied to userId + assetId
+router.post('/public/:assetId/verify-update', authMiddleware, async (req, res) => {
+  try {
+    const { totpCode } = req.body;
+    if (!totpCode || String(totpCode).trim() === '') {
+      return res.status(400).json({ message: 'Authenticator code is required.' });
+    }
+
+    // Load the authenticated user's TOTP secret — never trust anything from the frontend
+    const user = await User.findById(req.userId).select('twoFactorSecret twoFactorEnabled');
+    if (!user) {
+      return res.status(401).json({ message: 'User not found.' });
+    }
+    if (!user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.status(400).json({ message: 'Authenticator app is not set up for your account. Please complete 2FA setup first.' });
+    }
+
+    // Verify TOTP — do NOT log the code
+    const valid = totpVerify(String(totpCode).trim(), user.twoFactorSecret);
+    if (!valid) {
+      return res.status(400).json({ message: 'Invalid Authenticator code. Please try again.' });
+    }
+
+    const assetId = decodeURIComponent(req.params.assetId);
+
+    // Issue a short-lived, asset-scoped update token (5 minutes)
+    const updateToken = jwt.sign(
+      {
+        purpose:  'asset-update',
+        userId:   req.userId,
+        assetId:  assetId,
+      },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '5m' }
+    );
+
+    console.log('[assets] TOTP update-verification granted for userId:', req.userId, 'assetId:', assetId);
+
+    return res.json({ updateToken, message: 'Verification successful. You may now update the asset.' });
+  } catch (err) {
+    console.error('[assets] POST /public/:assetId/verify-update error:', err.message);
+    res.status(500).json({ message: err.message || 'Verification failed.' });
+  }
+});
+
 // Public lookup by assetId string — no auth needed, used by QR scan on phone
 router.get('/public/:assetId', async (req, res) => {
   try {
@@ -52,8 +154,8 @@ router.get('/public/:assetId', async (req, res) => {
   }
 });
 
-// Public update asset from mobile QR scan — no auth needed
-router.post('/public/:assetId/update', async (req, res) => {
+// Public update asset from mobile QR scan — requires login + TOTP update token
+router.post('/public/:assetId/update', authMiddleware, requireUpdateToken, async (req, res) => {
   try {
     const { status, latitude, longitude, location, remarks, scannedBy, updatedBy } = req.body;
     const assetId = decodeURIComponent(req.params.assetId);
